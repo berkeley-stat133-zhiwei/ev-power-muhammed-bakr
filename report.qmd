@@ -1,34 +1,283 @@
 ---
-title: "EV Power - Lab 4 Project Report"
-format: typst
+title: "EV Adoption vs Renewable Energy Mix (2021–2023)"
+format: pdf
 ---
-
-# Example Solution 1
 
 ## **Part 0: libraries**
 
 ```{r}
-
+library(tidyverse)
+library(leaflet)
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(janitor)
+library(readr)
+library(tigris)
+options(tigris_use_cache = TRUE)
+library(scales)
+library(dplyr)
+library(knitr)
+library(htmlwidgets)
+library(webshot2)
 ```
 
 ## **Part 1:** **Defining Research Question**
 
-Chosen Question:
+Chosen Question: In 2023, which states have a high number of EV registrations but a low share of renewable energy in their total energy mix?
+
+Did states with the fastest growth in renewable energy share (from 2021 to 2023) also experience a decrease (or slower increase) in their average energy prices over the same period?
 
 ## **Part 2: Data Preparation and Cleaning**
 
 ```{r}
+re_23 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/renew-use-2023.csv')
+re_22 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/renew-use-2022.csv')
+re_21 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/renew-use-2021.csv')
+total_23 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/total-use-2023.csv')
+total_22 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/total-use-2022.csv')
+total_21 = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/total-use-2021.csv')
+ev_reg = read.csv('/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/ev-registrations-by-state-2023.csv', skip = 2)
+avg_e_price <- read_csv(
+  "/Users/muhammedbakr/Desktop/Stat-133A/Projects/berkeley-stat133-zhiwei-classroom-ev-power-ev-power/data/av-energy-price-2021-2023.csv",
+  skip = 3,
+  quote = "",
+  col_names = c("state", "price_2021", "price_2022", "price_2023"),
+  trim_ws = TRUE)
+```
 
+```{r}
+re_23 <- re_23 %>% clean_names()
+re_22 <- re_22 %>% clean_names()
+re_21 <- re_21 %>% clean_names()
+
+total_23 <- total_23 %>% clean_names()
+total_22 <- total_22 %>% clean_names()
+total_21 <- total_21 %>% clean_names()
+
+ev_reg <- ev_reg %>% clean_names()
+avg_e_price <- avg_e_price %>% clean_names()
+
+avg_e_price <- avg_e_price |>
+  mutate(state = str_squish(state),
+    across(starts_with("price_"), readr::parse_number))
+```
+
+```{r}
+re_23 <- re_23 %>% rename(state = 1)
+re_22 <- re_22 %>% rename(state = 1)
+re_21 <- re_21 %>% rename(state = 1)
+
+total_23 <- total_23 %>% rename(state = 1)
+total_22 <- total_22 %>% rename(state = 1)
+total_21 <- total_21 %>% rename(state = 1)
+
+ev_reg <- ev_reg %>% rename(state = 1)
+avg_e_price <- avg_e_price %>% rename(state = 1)
+```
+
+```{r}
+STATE_MAP_2_TO_FULL <- c(setNames(state.name, state.abb), "DC" = "District of Columbia")
+
+normalize_state_full <- function(x) {
+  x %>%
+    str_trim() %>%
+    str_remove_all('^"|"$') %>%
+    str_replace_all(regex("^D\\.?C\\.?$", ignore_case = TRUE), "DC") %>%
+    (\(.) ifelse(str_detect(., "^[A-Za-z]{2}$"),
+                 STATE_MAP_2_TO_FULL[toupper(.)],
+                 str_to_title(.)))() %>%
+    replace_na("Unknown") %>%
+    as.character()
+}
+
+parse_num <- function(x) readr::parse_number(x)
+
+```
+
+```{r}
+avg_e_price <- avg_e_price %>%
+  clean_names() %>%
+  rename(state = 1,
+         price_2021 = 2, price_2022 = 3, price_2023 = 4) %>%
+  mutate(
+    state = normalize_state_full(state),
+    across(starts_with("price_"),
+           \(x) if (is.character(x)) readr::parse_number(x) else x))
+
+```
+
+```{r}
+clean_re_year <- function(df, year) {
+  nm <- paste0("renewable_use_", year)
+  df %>%
+    clean_names() %>%
+    rename(energy_source = 2, !!nm := 3) %>%
+    mutate(
+      state = normalize_state_full(state),
+      !!nm := parse_num(.data[[nm]]))
+}
+
+re_21 <- clean_re_year(re_21, 2021)
+re_22 <- clean_re_year(re_22, 2022)
+re_23 <- clean_re_year(re_23, 2023)
+
+```
+
+```{r}
+ev_reg <- ev_reg %>%
+  clean_names() %>%
+  rename(state = 1, ev_count = 2) %>%
+  mutate(state = normalize_state_full(state),
+    ev_count = parse_num(ev_count))
+```
+
+```{r}
+clean_total_year <- function(df, year) {
+  val_nm <- paste0("total_use_", year)
+  df %>%
+    clean_names() %>%
+    rename(energy_source = 1) %>%
+    pivot_longer(
+      cols = -energy_source,
+      names_to = "state_abbrev",
+      values_to = val_nm
+    ) %>%
+    mutate(
+      state = normalize_state_full(toupper(state_abbrev)),
+      !!val_nm := as.double(.data[[val_nm]])
+    ) %>%
+    select(state, energy_source, all_of(val_nm))
+}
+
+total_21_long <- clean_total_year(total_21, 2021)
+total_22_long <- clean_total_year(total_22, 2022)
+total_23_long <- clean_total_year(total_23, 2023)
 ```
 
 ## **Part 3: Joining / Pivoting Datasets for Analysis**
 
 ```{r}
+re_by_state <- re_21 %>%
+  group_by(state) %>%
+  summarise(renewable_use_2021 = sum(renewable_use_2021, na.rm = TRUE)) %>%
+  left_join(
+    re_22 %>% group_by(state) %>%
+      summarise(renewable_use_2022 = sum(renewable_use_2022, na.rm = TRUE)),
+    by = "state"
+  ) %>%
+  left_join(
+    re_23 %>% group_by(state) %>%
+      summarise(renewable_use_2023 = sum(renewable_use_2023, na.rm = TRUE)),
+    by = "state"
+  )
 
+state_panel <- re_by_state %>%
+  left_join(
+    total_21_long %>% group_by(state) %>%
+      summarise(total_use_2021 = sum(total_use_2021, na.rm = TRUE)),
+    by = "state"
+  ) %>%
+  left_join(
+    total_22_long %>% group_by(state) %>%
+      summarise(total_use_2022 = sum(total_use_2022, na.rm = TRUE)),
+    by = "state"
+  ) %>%
+  left_join(
+    total_23_long %>% group_by(state) %>%
+      summarise(total_use_2023 = sum(total_use_2023, na.rm = TRUE)),
+    by = "state"
+  ) %>%
+  left_join(ev_reg, by = "state") %>%
+  left_join(avg_e_price, by = "state")
+
+```
+
+```{r}
+state_panel <- state_panel %>%
+  mutate(
+    renew_share_2021 = renewable_use_2021 / total_use_2021,
+    renew_share_2022 = renewable_use_2022 / total_use_2022,
+    renew_share_2023 = renewable_use_2023 / total_use_2023
+  )
+```
+
+```{r}
+qs <- state_panel %>%
+  summarise(
+    ev_q3 = quantile(ev_count, 0.75, na.rm = TRUE),
+    rs_q1 = quantile(renew_share_2023, 0.25, na.rm = TRUE)
+  )
+
+panel_2023 <- state_panel %>%
+  mutate(high_ev = ev_count >= qs$ev_q3,
+    low_rs = renew_share_2023 <= qs$rs_q1,
+    flag_hiEV_loRS = high_ev & low_rs)
+
+high_ev_low_share_2023 = panel_2023 |>
+filter(high_ev == TRUE, low_rs == TRUE)
+```
+
+```{r}
+kable(head(state_panel, 10), caption = "Joined state panel (excerpt)")
+kable(high_ev_low_share_2023, caption = "2023: High EV registrations & Low Renewable Share")
 ```
 
 ## **Part 4: Mapping Visualization**
 
 ```{r}
 
+states_sf <- states(cb = TRUE, year = 2023, class = "sf") %>%
+  filter(!STUSPS %in% c("AS","GU","MP","PR","VI")) %>%
+  transmute(state = as.character(NAME), geometry)
+
+states_sf$state[states_sf$state == "District of Columbia"] <- "District Of Columbia"
+
+map_sf <- states_sf %>%
+  left_join(panel_2023, by = "state")
+```
+
+```{r}
+
+pal <- colorNumeric(palette = "Blues", domain = map_sf$renew_share_2023, na.color = "#dddddd")
+
+
+radius_fun <- function(x) sqrt(x) * 0.15
+
+leaflet(map_sf, options = leafletOptions(zoomControl = TRUE)) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(renew_share_2023),
+    weight = 0.7, color = "#555", opacity = 1,
+    fillOpacity = 0.8,
+    popup = ~sprintf(
+      "<b>%s</b><br/>Renewable share 2023: %s<br/>EV registrations: %s",
+      state,
+      percent(renew_share_2023, accuracy = 0.1),
+      comma(ev_count)
+    ),
+    group = "Renewable share (2023)"
+  ) %>%
+  addCircleMarkers(
+    data = st_centroid(map_sf),
+    radius = ~ifelse(is.na(ev_count), 0, pmax(3, radius_fun(ev_count))),
+    stroke = TRUE, weight = 1, color = "#444",
+    fillColor = "#2c7fb8", fillOpacity = 0.6,
+    label = ~sprintf("%s — EVs: %s", state, comma(ev_count)),
+    group = "EV registrations (bubbles)"
+  ) %>%
+  addPolylines(
+    data = subset(map_sf, flag_hiEV_loRS),
+    color = "#d7191c", weight = 3, opacity = 0.9,
+    group = "High EV + Low Renewables (highlight)"
+  ) %>%
+  addLegend("bottomright", pal = pal, values = ~renew_share_2023,
+            title = "Renewable share (2023)", labFormat = labelFormat(suffix = ""),
+            opacity = 0.8) %>%
+  addLayersControl(
+    overlayGroups = c("EV registrations (bubbles)", "High EV + Low Renewables (highlight)"),
+    baseGroups = c("Renewable share (2023)"),
+    options = layersControlOptions(collapsed = FALSE))
 ```
